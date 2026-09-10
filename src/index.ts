@@ -37,7 +37,7 @@ const DEFAULT_BAMBU_MODEL =
 const DEFAULT_BED_TYPE = process.env.BED_TYPE?.trim().toLowerCase() || "textured_plate";
 const DEFAULT_NOZZLE_DIAMETER = process.env.NOZZLE_DIAMETER?.trim() || "0.4";
 
-const VALID_BAMBU_MODELS = ["p1s", "p1p", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"] as const;
+const VALID_BAMBU_MODELS = ["p1s", "p1p", "p2s", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"] as const;
 type BambuModel = typeof VALID_BAMBU_MODELS[number];
 
 const VALID_BED_TYPES = ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"] as const;
@@ -47,6 +47,7 @@ const VALID_BAMBUSTUDIO_CLI_BED_TYPES = ["textured_plate", "cool_plate", "engine
 const BAMBU_MODEL_PRESETS: Record<string, (nozzle: string) => string> = {
   p1s: (n) => `Bambu Lab P1S ${n} nozzle`,
   p1p: (n) => `Bambu Lab P1P ${n} nozzle`,
+  p2s: (n) => `Bambu Lab P2S ${n} nozzle`,
   x1c: (n) => `Bambu Lab X1 Carbon ${n} nozzle`,
   x1e: (n) => `Bambu Lab X1E ${n} nozzle`,
   a1: (n) => `Bambu Lab A1 ${n} nozzle`,
@@ -55,11 +56,53 @@ const BAMBU_MODEL_PRESETS: Record<string, (nozzle: string) => string> = {
   h2s: (n) => `Bambu Lab H2S ${n} nozzle`,
 };
 
-const FILAMENT_PROFILE_DIR =
-  "/Applications/BambuStudio.app/Contents/Resources/profiles/BBL/filament";
+// BambuStudio ships its filament profiles alongside the application. The layout
+// is the same everywhere, but the install root is not, so resolve it rather than
+// hardcoding the macOS bundle path (which left every Windows/Linux install with
+// an empty filament index and no explanation).
+function resolveFilamentProfileDir(): string {
+  const override = process.env.FILAMENT_PROFILE_DIR?.trim();
+  if (override) return override;
+
+  const suffix = path.join("resources", "profiles", "BBL", "filament");
+
+  // Prefer the slicer the user actually configured — it is the only source that
+  // stays correct for portable or non-default installs.
+  const slicerPath = process.env.SLICER_PATH?.trim();
+  if (slicerPath) {
+    const fromSlicer = path.join(path.dirname(slicerPath), suffix);
+    if (fs.existsSync(fromSlicer)) return fromSlicer;
+  }
+
+  const candidates =
+    process.platform === "win32"
+      ? [
+          path.join("C:\\Program Files\\Bambu Studio", suffix),
+          path.join("C:\\Program Files (x86)\\Bambu Studio", suffix),
+          path.join(process.env.LOCALAPPDATA || "", "Programs", "Bambu Studio", suffix),
+        ]
+      : process.platform === "darwin"
+        ? ["/Applications/BambuStudio.app/Contents/Resources/profiles/BBL/filament"]
+        : [
+            path.join("/usr/share/bambu-studio", suffix),
+            path.join("/opt/bambu-studio", suffix),
+            path.join(process.env.HOME || "", ".local/share/bambu-studio", suffix),
+          ];
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+
+  // Nothing found: return the platform's canonical path so the existsSync guard
+  // downstream fails the same way it always has, just with a sane path in errors.
+  return candidates[0] || "";
+}
+
+const FILAMENT_PROFILE_DIR = resolveFilamentProfileDir();
 const FILAMENT_MODEL_CODES: Record<string, string> = {
   p1s: "P1S",
   p1p: "P1P",
+  p2s: "P2S",
   x1c: "X1C",
   x1e: "X1E",
   a1: "A1",
@@ -833,6 +876,7 @@ class BambuPrinterMCPServer {
               oneOf: [
                 { const: "p1s", title: "P1S" },
                 { const: "p1p", title: "P1P" },
+                { const: "p2s", title: "P2S" },
                 { const: "x1c", title: "X1 Carbon" },
                 { const: "x1e", title: "X1E" },
                 { const: "a1", title: "A1" },
@@ -1230,7 +1274,7 @@ class BambuPrinterMCPServer {
                 },
                 bambu_model: {
                   type: "string",
-                  enum: ["p1s", "p1p", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
+                  enum: ["p1s", "p1p", "p2s", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
                   description: "Optional model hint used to resolve Bambu/Orca filament profile JSONs for each tray."
                 },
                 nozzle_diameter: {
@@ -1250,7 +1294,7 @@ class BambuPrinterMCPServer {
                 plate_index: { type: "number", description: "0-based plate index to inspect (default: 0)" },
                 bambu_model: {
                   type: "string",
-                  enum: ["p1s", "p1p", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
+                  enum: ["p1s", "p1p", "p2s", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
                   description: "Optional model hint used to resolve Bambu/Orca filament profile JSONs for each tray."
                 },
                 nozzle_diameter: { type: "string", description: "Nozzle diameter in mm (default: 0.4)" },
@@ -1395,7 +1439,7 @@ class BambuPrinterMCPServer {
                 template_dir: { type: "string", description: "Optional template directory override when resolving template_name." },
                 bambu_model: {
                   type: "string",
-                  enum: ["p1s", "p1p", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
+                  enum: ["p1s", "p1p", "p2s", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
                   description: "REQUIRED: Bambu Lab printer model. Ask the user if not known. Using the wrong model can damage the printer."
                 },
                 slicer_type: {
@@ -1439,7 +1483,7 @@ class BambuPrinterMCPServer {
                 stl_path: { type: "string", description: "Path to the STL or 3MF file to slice" },
                 bambu_model: {
                   type: "string",
-                  enum: ["p1s", "p1p", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
+                  enum: ["p1s", "p1p", "p2s", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
                   description: "REQUIRED: Bambu Lab printer model. Ask the user if not known. Using the wrong model can damage the printer."
                 },
                 slicer_type: {
@@ -1494,7 +1538,7 @@ class BambuPrinterMCPServer {
           },
           {
             name: "camera_snapshot",
-            description: "Capture a single JPEG frame from the printer's chamber camera. TCP-on-6000 protocol (per OpenBambuAPI/video.md) — verified upstream for A1, A1 mini, P1S, P1P. X1/P2S use RTSP and are not yet supported. H2 series is undocumented and rejected with a clear error. Returns JPEG as base64; pass save_path to also write the bytes to disk.",
+            description: "Capture a single JPEG frame from the printer's chamber camera. Two transports: TCP-on-6000 (per OpenBambuAPI/video.md) for A1, A1 mini, P1S, P1P; RTSP-on-322 via ffmpeg for X1, X1C, X1E, P2S and the H2 series. Returns JPEG as base64; pass save_path to also write the bytes to disk.",
             inputSchema: {
               type: "object",
               properties: {
@@ -1778,7 +1822,7 @@ class BambuPrinterMCPServer {
                 three_mf_path: { type: "string", description: "Path to the 3MF file to print" },
                 bambu_model: {
                   type: "string",
-                  enum: ["p1s", "p1p", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
+                  enum: ["p1s", "p1p", "p2s", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
                   description: "REQUIRED: Bambu Lab printer model. Ask the user if not known. Using the wrong model can damage the printer."
                 },
                 bed_type: {
@@ -1828,7 +1872,7 @@ class BambuPrinterMCPServer {
                 template_dir: { type: "string", description: "Optional template directory override when resolving template_name." },
                 bambu_model: {
                   type: "string",
-                  enum: ["p1s", "p1p", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
+                  enum: ["p1s", "p1p", "p2s", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s"],
                   description: "REQUIRED: Bambu Lab printer model. H2D and H2S are the primary intended paths."
                 },
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
