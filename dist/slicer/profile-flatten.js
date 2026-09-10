@@ -22,6 +22,7 @@
  * fail loud rather than producing dangerous gcode for hardware we don't own.
  */
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 /* -------------------------------------------------------------------------- */
@@ -436,11 +437,26 @@ export function detectProfilesRoot(slicerPath) {
         return process.env["BAMBU_PROFILES_ROOT"];
     }
     if (slicerPath) {
+        const binDir = path.dirname(slicerPath);
         // macOS: /Applications/BambuStudio.app/Contents/MacOS/BambuStudio
         //  -> /Applications/BambuStudio.app/Contents/Resources/profiles
-        const macGuess = path.resolve(path.dirname(slicerPath), "..", "Resources", "profiles");
-        return macGuess;
+        const macGuess = path.resolve(binDir, "..", "Resources", "profiles");
+        // Windows/Linux: <install dir>/bambu-studio.exe
+        //  -> <install dir>/resources/profiles
+        const sideGuess = path.resolve(binDir, "resources", "profiles");
+        for (const guess of [macGuess, sideGuess]) {
+            if (existsSync(guess))
+                return guess;
+        }
+        // Neither exists -- return the one matching this platform's layout so the
+        // path in any downstream error message is at least the right shape.
+        return process.platform === "darwin" ? macGuess : sideGuess;
     }
-    // Default macOS install.
+    if (process.platform === "win32") {
+        return "C:\\Program Files\\Bambu Studio\\resources\\profiles";
+    }
+    if (process.platform === "linux") {
+        return "/usr/share/bambu-studio/resources/profiles";
+    }
     return "/Applications/BambuStudio.app/Contents/Resources/profiles";
 }

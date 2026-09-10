@@ -11,10 +11,53 @@ import { execFile } from 'child_process';
 import { flattenForCli, detectProfilesRoot } from '../slicer/profile-flatten.js';
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
-const BAMBU_PROFILE_ROOTS = [
-    '/Applications/BambuStudio.app/Contents/Resources/profiles/BBL',
-    '/Applications/OrcaSlicer.app/Contents/Resources/profiles/BBL',
-];
+// Slicer profile roots. These were macOS-only, which meant every Windows and
+// Linux install resolved no roots at all: findProfileFile() returned undefined
+// for every lookup, so the machine preset silently never reached the slicer and
+// the model-specific settings it carries were quietly dropped. Nothing errored.
+function resolveBambuProfileRoots() {
+    const roots = [];
+    const push = (p) => {
+        if (p && !roots.includes(p))
+            roots.push(p);
+    };
+    const suffix = path.join('resources', 'profiles', 'BBL');
+    // An explicit override wins, then the slicer the user actually configured.
+    const override = process.env.BAMBU_PROFILE_ROOT?.trim();
+    if (override)
+        push(override);
+    const slicerPath = process.env.SLICER_PATH?.trim();
+    if (slicerPath)
+        push(path.join(path.dirname(slicerPath), suffix));
+    if (process.platform === 'win32') {
+        const localAppData = process.env.LOCALAPPDATA || '';
+        push(path.join('C:\\Program Files\\Bambu Studio', suffix));
+        push(path.join('C:\\Program Files\\OrcaSlicer', suffix));
+        push(path.join('C:\\Program Files (x86)\\Bambu Studio', suffix));
+        push(path.join('C:\\Program Files (x86)\\OrcaSlicer', suffix));
+        if (localAppData) {
+            push(path.join(localAppData, 'Programs', 'Bambu Studio', suffix));
+            push(path.join(localAppData, 'Programs', 'OrcaSlicer', suffix));
+        }
+    }
+    else if (process.platform === 'darwin') {
+        push('/Applications/BambuStudio.app/Contents/Resources/profiles/BBL');
+        push('/Applications/OrcaSlicer.app/Contents/Resources/profiles/BBL');
+    }
+    else {
+        const home = process.env.HOME || '';
+        push(path.join('/usr/share/bambu-studio', suffix));
+        push(path.join('/usr/share/orcaslicer', suffix));
+        push(path.join('/opt/bambu-studio', suffix));
+        push(path.join('/opt/orcaslicer', suffix));
+        if (home) {
+            push(path.join(home, '.local/share/bambu-studio', suffix));
+            push(path.join(home, '.local/share/orcaslicer', suffix));
+        }
+    }
+    return roots;
+}
+const BAMBU_PROFILE_ROOTS = resolveBambuProfileRoots();
 const BAMBU_CLI_BED_TYPES = {
     textured_plate: 'Textured PEI Plate',
     cool_plate: 'Cool Plate',
