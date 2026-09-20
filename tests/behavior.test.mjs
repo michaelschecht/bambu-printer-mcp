@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -476,24 +477,30 @@ test("H2 print_3mf rejects pre-sliced filament jobs without explicit AMS mapping
   assert.doesNotMatch(errorText, /ECONNREFUSED|control socket/i);
 });
 
-test("H2 ams_slots expand into project-level ams_mapping and ams_mapping2", async () => {
+test("P2S gcode.3mf uses FTP root and preserves sparse AMS slots", async () => {
   const threeMfPath = await writeSliced3mfFixture({ plateFilamentIds: [1] });
   const bambu = new BambuImplementation();
   let uploaded = false;
+  let uploadPath;
   let publishedPayload = null;
 
-  bambu.ftpUpload = async () => {
+  bambu.ftpUpload = async (_host, _token, _file, remote) => {
+    uploadPath = remote;
     uploaded = true;
   };
-  bambu.getPrinter = async () => ({
-    publish: async (payload) => {
+  bambu.getPrinter = async () => {
+    const printer = new EventEmitter();
+    printer.publish = async (payload) => {
       publishedPayload = payload;
-    },
-  });
+      printer.emit("rawMessage", "report", Buffer.from(JSON.stringify({ print: { ...payload.print, result: "SUCCESS" } })));
+    };
+    return printer;
+  };
 
   try {
-    const result = await bambu.print3mf("127.0.0.1", "0938TEST0000000", "TEST_TOKEN", {
+    const result = await bambu.print3mf("127.0.0.1", "P2S_TEST_SERIAL", "TEST_TOKEN", {
       projectName: "cube",
+      bambuModel: "p2s",
       filePath: threeMfPath,
       plateIndex: 0,
       useAMS: true,
@@ -502,7 +509,10 @@ test("H2 ams_slots expand into project-level ams_mapping and ams_mapping2", asyn
     });
 
     assert.equal(uploaded, true, "print3mf should upload before publishing");
-    assert.equal(result.status, "success");
+    assert.equal(uploadPath, `/${path.basename(threeMfPath)}`);
+    assert.equal(publishedPayload.print.url, `ftp:///${path.basename(threeMfPath)}`);
+    assert.equal(result.status, "accepted");
+    assert.equal(result.started, false);
     assert.ok(publishedPayload?.print, "project_file payload should be published");
     assert.equal(publishedPayload.print.command, "project_file");
     assert.equal(publishedPayload.print.param, "Metadata/plate_1.gcode");
@@ -530,11 +540,14 @@ test("H2 two-color ams_slots expand at sparse project-level filament positions",
   let publishedPayload = null;
 
   bambu.ftpUpload = async () => {};
-  bambu.getPrinter = async () => ({
-    publish: async (payload) => {
+  bambu.getPrinter = async () => {
+    const printer = new EventEmitter();
+    printer.publish = async (payload) => {
       publishedPayload = payload;
-    },
-  });
+      printer.emit("rawMessage", "report", Buffer.from(JSON.stringify({ print: { ...payload.print, result: "SUCCESS" } })));
+    };
+    return printer;
+  };
 
   try {
     const result = await bambu.print3mf("127.0.0.1", "0938TEST0000000", "TEST_TOKEN", {
@@ -546,7 +559,8 @@ test("H2 two-color ams_slots expand at sparse project-level filament positions",
       bedType: "textured_plate",
     });
 
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "accepted");
+    assert.equal(result.started, false);
     assert.ok(publishedPayload?.print, "project_file payload should be published");
     assert.deepEqual(publishedPayload.print.ams_mapping, [-1, -1, -1, 1, 2, -1, -1, -1]);
     assert.deepEqual(publishedPayload.print.ams_mapping2, [

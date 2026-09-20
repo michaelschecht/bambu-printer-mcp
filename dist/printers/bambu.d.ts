@@ -1,4 +1,5 @@
 interface BambuPrintOptionsInternal {
+    bambuModel?: string;
     projectName: string;
     filePath: string;
     useAMS?: boolean;

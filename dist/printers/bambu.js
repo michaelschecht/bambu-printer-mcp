@@ -1,3 +1,4 @@
+import { publishPrintCommand } from "./print-command.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
@@ -449,14 +450,14 @@ export class BambuImplementation {
         remoteFileName = remoteFileName.replace(/\.gcode\.3mf\.gcode\.3mf$/i, ".gcode.3mf");
         // H2S/H2D land files at the FTP root and reference them via ftp:///<name>.
         // P1/A1/X1 use /cache/<name> and file:///sdcard/cache/<name>.
-        const isH2 = serial.startsWith("093") || serial.startsWith("094");
+        const model = (options.bambuModel ?? process.env.BAMBU_MODEL ?? "").toLowerCase();
+        const isH2 = model ? ["p2s", "h2s", "h2d"].includes(model) : serial.startsWith("093") || serial.startsWith("094");
         const remoteProjectPath = isH2 ? remoteFileName : `cache/${remoteFileName}`;
         const remoteUploadPath = isH2 ? `/${remoteFileName}` : `/cache/${remoteFileName}`;
         const projectUrl = isH2
             ? `ftp:///${remoteFileName}`
             : `file:///sdcard/${remoteProjectPath}`;
-        // Upload via basic-ftp directly (bypasses bambu-js double-path bug)
-        await this.ftpUpload(host, token, options.filePath, remoteUploadPath);
+        // Validate project metadata and mappings before uploading.
         // Pre-sliced .gcode.3mf files: routing depends on firmware generation.
         // P1/A1/X1 series: project_file returns 405004002 for .gcode.3mf (firmware
         // doesn't recognise the container), so use gcode_file instead.
@@ -464,11 +465,16 @@ export class BambuImplementation {
         // firmware can open the zip and find Metadata/plate_<n>.gcode directly.
         if (options.filePath.toLowerCase().endsWith(".gcode.3mf")) {
             if (!isH2) {
+                if (options.amsSlots?.length || options.amsMapping?.length) {
+                    throw new Error("Legacy gcode_file cannot preserve AMS mappings; use a project_file-compatible job.");
+                }
+                await this.ftpUpload(host, token, options.filePath, remoteUploadPath);
                 const printer = await this.getPrinter(host, serial, token);
                 await invokeWithoutAck(printer, new GCodeFileCommand({ fileName: remoteProjectPath }));
                 return {
-                    status: "success",
-                    message: `Uploaded and started gcode.3mf print: ${options.projectName}`,
+                    status: "unverified",
+                    started: false,
+                    message: `Command published; printer acceptance and start are unverified: ${options.projectName}`,
                     remoteProjectPath,
                 };
             }
@@ -545,10 +551,10 @@ export class BambuImplementation {
             amsMapping2 = amsMapping.map((v) => {
                 if (v < 0 || v === 255)
                     return { ams_id: 255, slot_id: 255 };
-                if (v >= 128)
-                    return { ams_id: 128, slot_id: v - 128 };
                 if (v === 254)
                     return { ams_id: 254, slot_id: 254 };
+                if (v >= 128)
+                    return { ams_id: 128, slot_id: v - 128 };
                 return { ams_id: Math.floor(v / 4), slot_id: v % 4 };
             });
         }
@@ -614,11 +620,10 @@ export class BambuImplementation {
                 },
             };
         }
-        await printer.publish(projectFileCmd);
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        await this.ftpUpload(host, token, options.filePath, remoteUploadPath);
+        const verification = await publishPrintCommand(printer, projectFileCmd);
         return {
-            status: "success",
-            message: `Uploaded and started 3MF print: ${options.projectName}`,
+            ...verification,
             remoteProjectPath,
             plateFile: projectMetadata.plateFileName,
             platePath: projectMetadata.plateInternalPath,
