@@ -14,6 +14,7 @@ import {
 import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
+import os from "os";
 import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { STLManipulator, type BambuSliceOptions } from "./stl/stl-manipulator.js";
@@ -807,6 +808,94 @@ function scanTemplateRegistry(templateDir: string): TemplateEntry[] {
 
 if (!fs.existsSync(TEMP_DIR)) {
   fs.mkdirSync(TEMP_DIR, { recursive: true });
+}
+
+/** Where the crash log goes. Override with BAMBU_MCP_LOG. */
+const MCP_LOG_PATH =
+  process.env.BAMBU_MCP_LOG ||
+  path.join(os.tmpdir(), "bambu-printer-mcp.log");
+
+function mcpLog(message: string): void {
+  const line = `[${new Date().toISOString()}] pid ${process.pid} ${message}
+`;
+  try {
+    fs.appendFileSync(MCP_LOG_PATH, line);
+  } catch {
+    /* a logger that throws is worse than no logger */
+  }
+  try {
+    process.stderr.write(line);
+  } catch {
+    /* stderr may already be gone on the way out */
+  }
+}
+
+/**
+ * Keep the stdio server alive, and leave evidence when something tries to
+ * kill it.
+ *
+ * The server was disconnecting from Claude Code repeatedly, always while
+ * idle and never mid-call, and reconnecting cleanly every time. The process
+ * was gone from the process table afterwards, so it was a real exit rather
+ * than a broken pipe. An earlier fix assumed stdin had drained and called
+ * `process.stdin.resume()`; that shipped, and the exits continued.
+ *
+ * Node exits the process on an unhandled rejection, and nothing here ever
+ * installed a handler. A long-lived MQTT client with `reconnectPeriod` set
+ * is exactly the kind of thing that raises one hours after the call that
+ * started it -- which matches "always while idle". Installing these handlers
+ * both records the cause and stops it being fatal, because for a tool server
+ * that reconnects to the printer lazily, surviving a stray socket error is
+ * the correct behaviour.
+ *
+ * If a genuinely unrecoverable error is being swallowed, the log says so and
+ * the next call fails loudly rather than the server vanishing in silence.
+ */
+function installStdioSurvival(): void {
+  mcpLog(`started (node ${process.version}, log ${MCP_LOG_PATH})`);
+
+  process.on("uncaughtException", (err) => {
+    mcpLog(`uncaughtException (NOT exiting): ${err?.stack ?? err}`);
+  });
+  process.on("unhandledRejection", (reason) => {
+    const r: any = reason;
+    mcpLog(`unhandledRejection (NOT exiting): ${r?.stack ?? r}`);
+  });
+
+  // A ref'd timer, so a momentarily empty event loop cannot end the process.
+  // `process.stdin.resume()` alone does not do this: once the stream ends,
+  // nothing holds a reference and node exits 0 with no output. That is
+  // measurable - drive this server from a pipe that closes and the log reads
+  // `stdin close` then `beforeExit (code 0) - the event loop emptied`.
+  const keepAlive = setInterval(() => {}, 60_000);
+  let shuttingDown = false;
+  const shutdown = (why: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    mcpLog(`${why}; shutting down`);
+    clearInterval(keepAlive);
+    process.exit(0);
+  };
+
+  // A real stdin EOF is the client going away, and is still honoured at once
+  // - the keep-alive must not turn a closed session into an orphaned node
+  // process sitting on the printer's MQTT connection.
+  process.stdin.on("end", () => shutdown("stdin end"));
+  process.stdin.on("close", () => shutdown("stdin close"));
+  process.stdin.on("error", (err) => mcpLog(`stdin error: ${err?.message}`));
+
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"] as const) {
+    try {
+      process.on(sig, () => shutdown(`${sig} received`));
+    } catch {
+      /* not every signal exists on every platform */
+    }
+  }
+
+  process.on("beforeExit", (code) =>
+    mcpLog(`beforeExit (code ${code}) - the event loop emptied`)
+  );
+  process.on("exit", (code) => mcpLog(`exit (code ${code})`));
 }
 
 class BambuPrinterMCPServer {
@@ -2483,7 +2572,7 @@ class BambuPrinterMCPServer {
             }
 
             const parsed3MFData = await parse3MF(threeMFPath);
-            const isH2Print = printModel === "h2s" || printModel === "h2d";
+            const isH2Print = ["p2s", "h2s", "h2d"].includes(printModel);
             let parsedAmsMapping: number[] | undefined;
             if (!isH2Print && parsed3MFData.slicerConfig?.ams_mapping) {
               const slots = Object.values(parsed3MFData.slicerConfig.ams_mapping)
@@ -2572,6 +2661,7 @@ class BambuPrinterMCPServer {
 
             result = await this.bambu.print3mf(host, bambuSerial, bambuToken, {
               projectName,
+              bambuModel: printModel,
               filePath: threeMFPath,
               plateIndex: 0,
               useAMS: useAMS,
@@ -2632,6 +2722,7 @@ class BambuPrinterMCPServer {
             const projectName = path.basename(preparedThreeMFPath).replace(/\.3mf$/i, '');
             result = await this.bambu.print3mf(host, bambuSerial, bambuToken, {
               projectName,
+              bambuModel: printModel,
               filePath: preparedThreeMFPath,
               plateIndex: collarAnalysis.plateIndex,
               useAMS: true,
@@ -2777,6 +2868,13 @@ class BambuPrinterMCPServer {
   async startStdio() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
+    // The transport's stdin reader is the only thing holding the event loop
+    // open. If it drains, node exits 0 with no output and the MCP connection
+    // just vanishes mid-session. Keeping stdin flowing was the first fix for
+    // that and it was not enough -- the process still disappears while idle,
+    // so everything below exists to find out why and to stop it happening.
+    process.stdin.resume();
+    installStdioSurvival();
     console.error("Bambu Printer MCP server running on stdio");
   }
 
